@@ -5,10 +5,10 @@ from typing import Optional
 
 from sqlalchemy import (
     create_engine, String, Integer, Text, Boolean, Float, ForeignKey, Date, DateTime,
-    event, Table, Column, UniqueConstraint, CheckConstraint
+    event, Table, Column, UniqueConstraint, CheckConstraint, text
 )
 
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker, scoped_session
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 APP_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(APP_DIR, 'data')
@@ -23,7 +23,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
-SessionLocal = scoped_session(sessionmaker(bind=engine, autoflush=False, autocommit=False))
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 class Base(DeclarativeBase):
     pass
@@ -124,10 +124,14 @@ class Function(Base):
     department_id: Mapped[int] = mapped_column(ForeignKey('departments.id', ondelete='CASCADE'))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
+    prof_weight: Mapped[int] = mapped_column(Integer, default=3)
 
     department: Mapped['Department'] = relationship(back_populates='functions')
     positions: Mapped[list['Position']] = relationship(secondary=function_position, back_populates='functions')
     tasks: Mapped[list['Task']] = relationship(back_populates='function', cascade="all, delete-orphan")
+        __table_args__ = (
+        CheckConstraint('prof_weight BETWEEN 1 AND 3', name='chk_function_prof_weight'),
+    )
 
 class Task(Base):
     __tablename__ = 'tasks'
@@ -224,7 +228,13 @@ def get_session():
 
 def init_db():
     Base.metadata.create_all(engine)
-    # дефолтные уровни
+    # миграция prof_weight
+    with engine.begin() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(functions)"))]
+        if 'prof_weight' not in cols:
+            conn.execute(text("ALTER TABLE functions ADD COLUMN prof_weight INTEGER DEFAULT 3"))
+
+    # дефолтные уровни и настройки
     with get_session() as s:
         if s.query(Level).count() == 0:
             s.add_all([
@@ -233,11 +243,21 @@ def init_db():
                 Level(id=3, name='Низкий', order_index=3, color_hex='#e74c3c'),
             ])
             s.commit()
-        # пороги уровней по умолчанию
-        if not s.get(AppSetting, 'LEVEL_THRESHOLD_L1'):
-            s.add(AppSetting(key='LEVEL_THRESHOLD_L1', value='0.85'))
-        if not s.get(AppSetting, 'LEVEL_THRESHOLD_L2'):
-            s.add(AppSetting(key='LEVEL_THRESHOLD_L2', value='0.60'))
-        if not s.get(AppSetting, 'LEVEL_ORDER_DESC'):  # 3>2>1
-            s.add(AppSetting(key='LEVEL_ORDER_DESC', value='true'))
+        defaults = {
+            'LEVEL_THRESHOLD_L1': '0.85',
+            'LEVEL_THRESHOLD_L2': '0.60',
+            'LEVEL_ORDER_DESC': 'true',
+            'GATE_A_COVERAGE_3to2': '0.70',
+            'GATE_A_COVERAGE_2to1': '0.80',
+            'GATE_D_FUNC_3to2': '0.65',
+            'GATE_D_FUNC_2to1': '0.80',
+            'GATE_E_COMP_3to2': '0.70',
+            'GATE_E_COMP_2to1': '0.85',
+            'MANDATORY_3to2_MIN_S': '0.50',
+            'MANDATORY_2to1_MIN_S': '0.75',
+            'APEX_MIN_S': '0.85',
+        }
+        for k, v in defaults.items():
+            if not s.get(AppSetting, k):
+                s.add(AppSetting(key=k, value=str(v)))
         s.commit()
